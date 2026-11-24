@@ -1,13 +1,20 @@
 //! In-app updates, the same way as Prism: read the latest GitHub release,
 //! download its `TDT-Setup.exe`, verify it, start it silently, and quit.
 //! Setup replaces TDT.exe and starts the new version. Speech models stay.
+//!
+//! On macOS the check is the same, but it looks for `TDT-macOS.dmg`, and
+//! "Update now" opens the release page. The user drags the new app over the
+//! old one, so the signed bundle is always replaced as a whole.
 
+#[cfg(not(target_os = "macos"))]
 use std::io::{Read, Write};
+#[cfg(not(target_os = "macos"))]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+#[cfg(not(target_os = "macos"))]
 use sha2::Digest;
 
 /// Fixed at compile time, so a release build cannot be redirected at runtime.
@@ -15,7 +22,15 @@ const REPO: &str = match option_env!("TDT_UPDATE_REPO") {
     Some(repo) => repo,
     None => "Hi9841/tdt",
 };
+#[cfg(not(target_os = "macos"))]
 const ASSET: &str = "TDT-Setup.exe";
+#[cfg(target_os = "macos")]
+const ASSET: &str = "TDT-macOS.dmg";
+/// The label of the button that installs an available release.
+#[cfg(not(target_os = "macos"))]
+pub const INSTALL_LABEL: &str = "Update now";
+#[cfg(target_os = "macos")]
+pub const INSTALL_LABEL: &str = "Download";
 /// Automatic checks (start, every hour, panel open) run at most this often.
 const AUTO_CHECK_EVERY: Duration = Duration::from_secs(10 * 60);
 
@@ -46,6 +61,9 @@ impl UpdatePhase {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Release {
     pub version: String,
+    /// The release page on GitHub.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    page: String,
     url: String,
     size: u64,
     /// Lowercase hex. A release without one is never offered.
@@ -57,6 +75,7 @@ impl Release {
     pub fn preview(version: &str) -> Self {
         Self {
             version: version.into(),
+            page: String::new(),
             url: String::new(),
             size: 7_900_000,
             sha256: String::new(),
@@ -67,6 +86,7 @@ impl Release {
 #[derive(serde::Deserialize)]
 struct GitHubRelease {
     tag_name: String,
+    html_url: String,
     assets: Vec<GitHubAsset>,
 }
 
@@ -157,8 +177,30 @@ pub fn check(cell: &Arc<Mutex<UpdatePhase>>, kind: CheckKind, auto_checks: bool)
     });
 }
 
+/// Opens the page of the available release, where the user downloads the
+/// new disk image. The phase stays `Available`.
+#[cfg(target_os = "macos")]
+pub fn install(cell: &Arc<Mutex<UpdatePhase>>) {
+    let page = match &*cell.lock() {
+        UpdatePhase::Available(release) => release.page.clone(),
+        _ => return,
+    };
+    // Only a GitHub page of this repository, never a URL from elsewhere.
+    if !page.starts_with(&format!("https://github.com/{REPO}/releases/")) {
+        *cell.lock() = UpdatePhase::Failed("GitHub sent an unexpected release page.".into());
+        return;
+    }
+    if let Err(error) = std::process::Command::new("/usr/bin/open")
+        .arg(&page)
+        .status()
+    {
+        *cell.lock() = UpdatePhase::Failed(format!("Could not open the release page: {error}"));
+    }
+}
+
 /// Downloads the available release on a new thread and starts its setup.
 /// On success the phase becomes `Installing`, and the main loop quits TDT.
+#[cfg(not(target_os = "macos"))]
 pub fn install(cell: &Arc<Mutex<UpdatePhase>>) {
     let release = {
         let mut phase = cell.lock();
@@ -222,10 +264,16 @@ fn latest_release() -> Result<Option<Release>, String> {
     let release: GitHubRelease = response
         .into_json()
         .map_err(|_| "GitHub sent an unexpected answer.".to_string())?;
-    let version = release.tag_name.trim().trim_start_matches(['v', 'V']);
-    if !is_newer(version, current_version()) {
+    let tag = release.tag_name.trim().trim_start_matches(['v', 'V']);
+    if !is_newer(tag, current_version()) {
         return Ok(None);
     }
+    // Only the numbers of the tag: the version names a temporary file, so
+    // it must not hold a path.
+    let Some((major, minor, patch)) = parse_version(tag) else {
+        return Ok(None);
+    };
+    let version = format!("{major}.{minor}.{patch}");
     // A release that is still uploading has no setup yet.
     let Some(asset) = release.assets.into_iter().find(|a| a.name == ASSET) else {
         return Ok(None);
@@ -241,13 +289,15 @@ fn latest_release() -> Result<Option<Release>, String> {
         return Err("GitHub did not send the update's checksum. Try again later.".into());
     };
     Ok(Some(Release {
-        version: version.to_string(),
+        version,
+        page: release.html_url,
         url: asset.browser_download_url,
         size: asset.size,
         sha256,
     }))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn download(release: &Release, mut on_progress: impl FnMut(u64)) -> Result<PathBuf, String> {
     let failed = |e: &dyn std::fmt::Display| format!("Download failed: {e}");
     let path = std::env::temp_dir().join(format!("TDT-Setup-{}.exe", release.version));
@@ -269,6 +319,13 @@ fn download(release: &Release, mut on_progress: impl FnMut(u64)) -> Result<PathB
         }
         if done == 0 && read >= 2 {
             head.copy_from_slice(&chunk[..2]);
+        }
+        // A download longer than the size GitHub gave can only fail the
+        // check below, so it stops before it fills the disk.
+        if done + read as u64 > release.size {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err("The download is larger than the release. Try again.".into());
         }
         hasher.update(&chunk[..read]);
         file.write_all(&chunk[..read]).map_err(|e| failed(&e))?;
@@ -294,20 +351,23 @@ fn download(release: &Release, mut on_progress: impl FnMut(u64)) -> Result<PathB
     Ok(path)
 }
 
+fn parse_version(raw: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = raw.split(['.', '-', '+']);
+    Some((
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next().unwrap_or("0").parse().ok()?,
+    ))
+}
+
 fn is_newer(latest: &str, current: &str) -> bool {
-    fn parse(raw: &str) -> Option<(u64, u64, u64)> {
-        let mut parts = raw.split(['.', '-', '+']);
-        Some((
-            parts.next()?.parse().ok()?,
-            parts.next()?.parse().ok()?,
-            parts.next().unwrap_or("0").parse().ok()?,
-        ))
-    }
-    matches!((parse(latest), parse(current)), (Some(l), Some(c)) if l > c)
+    matches!((parse_version(latest), parse_version(current)), (Some(l), Some(c)) if l > c)
 }
 
 fn agent(timeout: Duration) -> ureq::Agent {
     ureq::AgentBuilder::new()
+        // A redirect may not leave HTTPS.
+        .https_only(true)
         .timeout_connect(Duration::from_secs(10))
         .timeout(timeout)
         .user_agent(&format!(
@@ -318,6 +378,7 @@ fn agent(timeout: Duration) -> ureq::Agent {
 }
 
 /// Deletes the setup that an earlier update downloaded.
+#[cfg(not(target_os = "macos"))]
 pub fn remove_downloaded_setups() {
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
         return;
@@ -330,3 +391,7 @@ pub fn remove_downloaded_setups() {
         }
     }
 }
+
+/// macOS downloads no setup: the browser downloads the disk image.
+#[cfg(target_os = "macos")]
+pub fn remove_downloaded_setups() {}

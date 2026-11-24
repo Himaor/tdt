@@ -212,8 +212,9 @@ fn bench_model(spec: &ModelSpec, clips: &[Clip], options: &Options) {
         println!("Skipped: model directory not found.");
         return;
     };
-    // The folder is the first one of the search that holds the model: a
-    // `models` folder in the current folder comes before the installed one.
+    // The folder is the first one of the search that holds the model: in a
+    // debug build a `models` folder in the current folder comes before the
+    // data folder; a release build reads only the data folder.
     println!("Folder: {}", model_dir.display());
 
     let t0 = Instant::now();

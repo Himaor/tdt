@@ -648,7 +648,7 @@ impl HudView {
                     latency_ms: 240,
                     finished_at: Instant::now(),
                 };
-                self.recovery = Some(Recovery { message: "Copied. Could not insert all text. Check the destination before pasting with Ctrl+V.".into(), kind: ErrorKind::Other });
+                self.recovery = Some(Recovery { message: format!("Copied. Could not insert all text. Check the destination before pasting with {}.", crate::os_text::PASTE_KEYS), kind: ErrorKind::Other });
             }
             PreviewSpec::BubbleLimit => {
                 self.status = HudStatus::Listening {
@@ -672,7 +672,7 @@ impl HudView {
                 self.active_model = Some(PREVIEW_OTHER_MODEL.into());
                 self.model_ready_note = Some(models::resolve(PREVIEW_OTHER_MODEL).label);
             }
-            PreviewSpec::PanelRecovery => self.set_error("Microphone disconnected. Connect a microphone, check Windows microphone access, then choose Retry microphone.".into(), ErrorKind::Microphone),
+            PreviewSpec::PanelRecovery => self.set_error(format!("Microphone disconnected. Connect a microphone, check {}, then choose Retry microphone.", crate::os_text::MICROPHONE_ACCESS), ErrorKind::Microphone),
             PreviewSpec::PanelClearHistory => {
                 self.active_tab = SettingsTab::Stats;
                 self.stats = preview::fixture_stats(3);
@@ -717,8 +717,7 @@ impl HudView {
             }
             PreviewSpec::PanelSettingsStartupError => {
                 self.settings_error = Some(
-                    "Could not change startup. Check Windows startup permissions and try again."
-                        .into(),
+                    format!("Could not change startup. Check {} and try again.", crate::os_text::STARTUP_PERMISSIONS),
                 );
             }
             PreviewSpec::PanelSettingsHotkeyCapture => {
@@ -1108,13 +1107,13 @@ impl HudView {
             }
             Err(error) => {
                 voice_stt_desktop::log::note(&format!(
-                    "Could not change the start with Windows: {error}"
+                    "Could not change the start at sign-in: {error}"
                 ));
                 self.autostart_enabled = crate::autostart::is_enabled();
-                self.settings_error = Some(
-                    "Could not change startup. Check Windows startup permissions and try again."
-                        .into(),
-                );
+                self.settings_error = Some(format!(
+                    "Could not change startup. Check {} and try again.",
+                    crate::os_text::STARTUP_PERMISSIONS
+                ));
             }
         }
     }
@@ -1249,6 +1248,29 @@ impl HudView {
     }
 
     /// The microphone opened again after a failure.
+    /// Removes `notice` from the error on the pill, such as the request for
+    /// the Accessibility permission after the user gave it. Other errors
+    /// that `show_startup_error` joined to it stay.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn clear_notice(&mut self, notice: &str) {
+        let HudStatus::Error { message, .. } = &self.status else {
+            return;
+        };
+        if !message.contains(notice) {
+            return;
+        }
+        let rest = message.replace(notice, "").trim().to_string();
+        if rest.is_empty() {
+            self.microphone_ready();
+        } else {
+            let kind = self
+                .recovery
+                .as_ref()
+                .map_or(ErrorKind::Other, |recovery| recovery.kind);
+            self.set_error(rest, kind);
+        }
+    }
+
     fn microphone_ready(&mut self) {
         self.status = HudStatus::Idle;
         self.recovery = None;
@@ -2299,7 +2321,7 @@ impl HudView {
             }),
         );
         let startup_row = settings_row(
-            "Start with Windows",
+            crate::os_text::START_AT_SIGN_IN,
             "Opens TDT when you sign in.".to_string(),
             startup_switch.into_any_element(),
         )
@@ -2365,7 +2387,7 @@ impl HudView {
             ),
             UpdatePhase::Available(release) => (
                 format!("Version {} is ready. You have {current}.", release.version),
-                "Update now".to_string(),
+                update::INSTALL_LABEL.to_string(),
             ),
             UpdatePhase::Downloading { done, total } => (
                 format!(
@@ -2423,8 +2445,9 @@ impl HudView {
             "Save takes for testing",
             if self.save_takes() {
                 format!(
-                    "Audio and text go to LOCALAPPDATA\\{}\\{}.",
-                    voice_stt_desktop::DATA_DIR_NAME,
+                    "Audio and text go to {}{}{}.",
+                    voice_stt_desktop::DATA_DIR_LABEL,
+                    std::path::MAIN_SEPARATOR,
                     voice_stt_desktop::stt::takes::FOLDER_NAME
                 )
             } else {

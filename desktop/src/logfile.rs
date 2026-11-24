@@ -1,10 +1,25 @@
-//! TDT's log, `tdt.log` next to TDT.exe. Each line of the program goes
-//! through `voice_stt_desktop::log::note`; `main` makes this file its sink.
+//! TDT's log, `tdt.log` next to TDT.exe (Windows) or in `~/Library/Logs/TDT`
+//! (macOS, where the app bundle is signed and must not change). Each line of
+//! the program goes through `voice_stt_desktop::log::note`; `main` makes this
+//! file its sink.
 
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 
+#[cfg(target_os = "macos")]
+fn log_file() -> PathBuf {
+    directories::BaseDirs::new()
+        .map(|dirs| dirs.home_dir().join("Library/Logs/TDT"))
+        .and_then(|dir| {
+            std::fs::create_dir_all(&dir)
+                .ok()
+                .map(|()| dir.join("tdt.log"))
+        })
+        .unwrap_or_else(|| std::env::temp_dir().join("tdt.log"))
+}
+
+#[cfg(not(target_os = "macos"))]
 fn log_file() -> PathBuf {
     std::env::current_exe()
         .ok()

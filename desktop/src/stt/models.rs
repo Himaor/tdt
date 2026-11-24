@@ -483,19 +483,20 @@ fn preferred_root() -> PathBuf {
     crate::data_dir().map_or_else(|| PathBuf::from("models"), |dir| dir.join("models"))
 }
 
+/// Where TDT looks for a downloaded model: the user's data folder, which
+/// only this user can write. A folder next to the program, or above it, can
+/// belong to another user (`C:\models` for a TDT in `C:\Program Files\TDT`,
+/// `/Applications/models` for a TDT in `/Applications`), and the model
+/// decides the text that TDT types. The user names any other folder in the
+/// settings (`model_dir`) or in `VOICE_STT_MODEL_DIR`.
+///
+/// A debug build also reads `models` in the working folder, for development.
 fn model_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
+    #[cfg(debug_assertions)]
     if let Ok(cwd) = std::env::current_dir() {
         roots.push(cwd.join("models"));
         roots.push(cwd.join("../models"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            roots.push(dir.join("models"));
-            roots.push(dir.join("../models"));
-            roots.push(dir.join("../../models"));
-            roots.push(dir.join("../../../models"));
-        }
     }
     if let Some(dir) = crate::data_dir() {
         roots.push(dir.join("models"));
@@ -505,4 +506,22 @@ fn model_roots() -> Vec<PathBuf> {
 
 fn canonicalize_or_clone(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    /// The folders that TDT 0.9.12 and older searched next to the program.
+    #[test]
+    fn model_roots_are_not_next_to_the_program() {
+        let exe = std::env::current_exe().expect("exe path");
+        let dir = exe.parent().expect("exe dir");
+        let old = ["models", "../models", "../../models", "../../../models"].map(|r| dir.join(r));
+        for root in super::model_roots() {
+            assert!(
+                !old.contains(&root),
+                "{} is next to the program",
+                root.display()
+            );
+        }
+    }
 }

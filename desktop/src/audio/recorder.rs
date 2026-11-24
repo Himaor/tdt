@@ -89,6 +89,8 @@ pub struct CaptureHandle {
 
 impl AudioRecorder {
     pub fn new() -> Result<Self, String> {
+        #[cfg(target_os = "macos")]
+        check_macos_access()?;
         let host = cpal::default_host();
         // Read the default endpoint ID and CPAL default device handle together,
         // re-reading once if Windows switched the default in between so we never
@@ -631,6 +633,59 @@ fn build_stream(
             )
             .map_err(|error| format!("Failed to build input stream: {error}")),
         _ => Err(unsupported()),
+    }
+}
+
+/// Set when the user answered the microphone prompt; the UI loop then opens
+/// the microphone (`take_microphone_answer`).
+#[cfg(target_os = "macos")]
+static MICROPHONE_ANSWERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// True while the user has not answered the macOS microphone prompt.
+#[cfg(target_os = "macos")]
+pub fn microphone_not_asked() -> bool {
+    crate::macos::microphone_access() == crate::macos::MicrophoneAccess::NotAsked
+}
+
+/// Shows the macOS microphone prompt without waiting. The answer wakes the
+/// UI loop, which opens the microphone, or shows why it cannot.
+#[cfg(target_os = "macos")]
+pub fn ask_microphone() {
+    crate::macos::request_microphone_access(|granted| {
+        voice_stt_desktop::log::note(if granted {
+            "The user allowed the microphone."
+        } else {
+            "The user denied the microphone."
+        });
+        MICROPHONE_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::hotkey::wake_loop();
+    });
+}
+
+/// True once after the user answered the microphone prompt.
+#[cfg(target_os = "macos")]
+pub fn take_microphone_answer() -> bool {
+    MICROPHONE_ANSWERED.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// macOS opens the microphone only after the user allowed it, and a first
+/// open waits for the user's answer. Ask without waiting; the next take, or
+/// Retry microphone, opens it.
+#[cfg(target_os = "macos")]
+fn check_macos_access() -> Result<(), String> {
+    use crate::macos::{microphone_access, MicrophoneAccess};
+    match microphone_access() {
+        MicrophoneAccess::Allowed => Ok(()),
+        MicrophoneAccess::NotAsked => {
+            ask_microphone();
+            Err("Allow TDT to use the microphone in the macOS prompt.".into())
+        }
+        MicrophoneAccess::Denied => Err(
+            "macOS does not let TDT use the microphone. Allow TDT in System Settings > Privacy & \
+             Security > Microphone, then choose Retry microphone."
+                .into(),
+        ),
     }
 }
 

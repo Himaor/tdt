@@ -257,7 +257,10 @@ impl Dictation {
                 vec![ViewChange::MicrophoneReady]
             }
             Err(error) => vec![ViewChange::Error(
-                format!("Could not open the microphone. Check Windows microphone access and try again. {error}"),
+                format!(
+                    "Could not open the microphone. Check {} and try again. {error}",
+                    crate::os_text::MICROPHONE_ACCESS
+                ),
                 ErrorKind::Microphone,
             )],
         }

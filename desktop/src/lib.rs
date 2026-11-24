@@ -5,12 +5,27 @@ pub const SAMPLE_RATE: usize = 16_000;
 /// `%LOCALAPPDATA%\TDT`: the models, the dictionary, and the test takes.
 /// Setup installs TDT.exe here too, and uninstall keeps `models` and
 /// `dictionary.txt` (`packaging/tdt-setup`, `USER_DATA`).
+#[cfg(not(target_os = "macos"))]
 pub fn data_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|dir| std::path::PathBuf::from(dir).join(DATA_DIR_NAME))
 }
 
-/// The name of the data folder in `%LOCALAPPDATA%`.
+/// `~/Library/Application Support/TDT`: the models, the dictionary, and the
+/// test takes. The app bundle is read-only after signing, so nothing goes there.
+#[cfg(target_os = "macos")]
+pub fn data_dir() -> Option<std::path::PathBuf> {
+    directories::BaseDirs::new().map(|dirs| dirs.data_dir().join(DATA_DIR_NAME))
+}
+
+/// The name of the data folder in `%LOCALAPPDATA%` (Windows) or in
+/// `~/Library/Application Support` (macOS).
 pub const DATA_DIR_NAME: &str = "TDT";
+
+/// Where the user finds the data folder, for the Settings text.
+#[cfg(not(target_os = "macos"))]
+pub const DATA_DIR_LABEL: &str = "LOCALAPPDATA\\TDT";
+#[cfg(target_os = "macos")]
+pub const DATA_DIR_LABEL: &str = "~/Library/Application Support/TDT";
 
 pub mod log;
 pub mod resample;

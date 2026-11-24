@@ -27,7 +27,10 @@ jobs:
       # runs only in the local release build (packaging/build-installer.ps1).
       - name: Build TDT-Setup.exe
         shell: pwsh
-        run: ./packaging/build-installer.ps1 -Version "${{ github.ref_name }}" -SkipAccuracy
+        # The tag goes through the environment, never into the script text.
+        env:
+          TAG: ${{ github.ref_name }}
+        run: ./packaging/build-installer.ps1 -Version "$env:TAG" -SkipAccuracy
       # TDT-Setup.exe is the release. SHA256SUMS.txt only lets TDT 0.2.32
       # and older find it; drop it when those versions are gone.
       - name: Publish GitHub release
@@ -37,3 +40,62 @@ jobs:
             dist/TDT-Setup.exe
             dist/SHA256SUMS.txt
           generate_release_notes: true
+
+  # The macOS app, for Apple silicon and Intel. It goes on the release that
+  # the windows job made. Without the signing secrets the app has an ad-hoc
+  # signature, and macOS asks each user to allow it once in System Settings >
+  # Privacy & Security. With them it is signed with a Developer ID and notarized.
+  macos:
+    needs: windows
+    runs-on: macos-latest
+    # A step's `if` cannot read secrets or its own env, so the job states which ones exist.
+    env:
+      HAS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+      HAS_NOTARY: ${{ secrets.MACOS_NOTARY_APPLE_ID != '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: desktop
+      - name: Import the signing certificate
+        env:
+          CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        if: env.HAS_CERTIFICATE == 'true'
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          echo "$CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$CERTIFICATE_PASSWORD" -f pkcs12 -k "$keychain" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          rm "$RUNNER_TEMP/certificate.p12"
+      - name: Store the notary credentials
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        if: env.HAS_NOTARY == 'true'
+        run: |
+          xcrun notarytool store-credentials tdt-notary \
+            --apple-id "$NOTARY_APPLE_ID" --team-id "$NOTARY_TEAM_ID" --password "$NOTARY_PASSWORD"
+          echo "MACOS_NOTARY_PROFILE=tdt-notary" >> "$GITHUB_ENV"
+      - name: Build TDT-macOS.dmg
+        env:
+          TAG: ${{ github.ref_name }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: ./packaging/macos/build-app.sh --version "$TAG" --universal
+      - name: Add to the GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: |
+            dist/TDT-macOS.dmg
+            dist/TDT-macOS.dmg.sha256
+

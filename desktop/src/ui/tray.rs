@@ -3,7 +3,12 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 /// Ordinal of the icon in `desktop/assets/tdt.rc`. Same image as the exe icon.
+#[cfg(windows)]
 const APP_ICON_ID: u16 = 1;
+
+/// A click on the icon opens the menu on macOS, as each menu bar app does.
+/// On Windows a left click opens TDT, and a right click opens the menu.
+const MENU_ON_LEFT_CLICK: bool = cfg!(target_os = "macos");
 
 pub struct SystemTray {
     pub tray_icon: TrayIcon,
@@ -47,11 +52,16 @@ impl SystemTray {
 
         let icon = app_icon()?;
 
-        let tray_icon = TrayIconBuilder::new()
+        let builder = TrayIconBuilder::new()
             .with_menu(Box::new(tray_menu))
-            .with_menu_on_left_click(false)
-            .with_tooltip(tooltip_text(hotkey_label))
-            .with_icon(icon)
+            .with_menu_on_left_click(MENU_ON_LEFT_CLICK)
+            .with_tooltip(tooltip_text(hotkey_label));
+        // macOS tints a template image for light and dark menu bars.
+        #[cfg(target_os = "macos")]
+        let builder = builder.with_icon_templated(icon);
+        #[cfg(not(target_os = "macos"))]
+        let builder = builder.with_icon(icon);
+        let tray_icon = builder
             .build()
             .map_err(|e| format!("Failed to build tray icon: {e}"))?;
 
@@ -88,12 +98,38 @@ impl SystemTray {
     }
 }
 
+#[cfg(windows)]
 fn app_icon() -> Result<Icon, String> {
     let side = tray_icon_px();
     Icon::from_resource(APP_ICON_ID, Some((side, side)))
         .map_err(|error| format!("Failed to load the app icon: {error}"))
 }
 
+/// The menu bar icon on macOS: a template image (black with alpha, which
+/// macOS tints for light and dark menu bars) of the orb, a ring around a
+/// dot, at 22 points for a 2x screen.
+#[cfg(target_os = "macos")]
+fn app_icon() -> Result<Icon, String> {
+    const SIDE: u32 = 44;
+    let center = (SIDE as f32 - 1.0) / 2.0;
+    let mut rgba = Vec::with_capacity((SIDE * SIDE * 4) as usize);
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            let distance = (x as f32 - center).hypot(y as f32 - center);
+            // Coverage of the ring (radius 15 to 19) and the dot (radius 7),
+            // with one pixel of smoothing at each edge.
+            let edge = |inside: f32| inside.clamp(0.0, 1.0);
+            let ring = edge(19.0 - distance).min(edge(distance - 14.0));
+            let dot = edge(7.5 - distance);
+            let alpha = (ring.max(dot) * 255.0).round() as u8;
+            rgba.extend_from_slice(&[0, 0, 0, alpha]);
+        }
+    }
+    Icon::from_rgba(rgba, SIDE, SIDE)
+        .map_err(|error| format!("Failed to make the menu bar icon: {error}"))
+}
+
+#[cfg(windows)]
 fn tray_icon_px() -> u32 {
     use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
     // SAFETY: GetSystemMetrics takes no pointers.

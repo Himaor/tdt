@@ -5,12 +5,12 @@
 <h1 align="center">TDT (Talk Don't Type)</h1>
 
 <p align="center">
-  <b>Offline dictation for Windows.</b> Press a key, speak, and the text appears in the app you use.<br>
+  <b>Offline dictation for Windows and macOS.</b> Press a key, speak, and the text appears in the app you use.<br>
   No cloud, no account, no audio leaves your computer.
 </p>
 
 <p align="center">
-  <a href="https://github.com/Hi9841/tdt/releases/latest"><b>Download TDT-Setup.exe</b></a>
+  <a href="https://github.com/Hi9841/tdt/releases/latest"><b>Download TDT-Setup.exe or TDT-macOS.dmg</b></a>
   ·
   <a href="https://github.com/Hi9841/trit">Trit speech engine</a>
   ·
@@ -43,8 +43,38 @@
    Setup installs TDT for the current user and opens it.
 2. Open Settings and download **Parakeet Redux** (178 MB).
 
+TDT looks for the models only in its data folder
+(`%LOCALAPPDATA%\TDT\models`). TDT 0.9.12 and older also looked in a
+`models` folder next to TDT.exe and in the folders above it. Another user of
+the computer could put a model there, so TDT no longer does. If you keep the
+models in another folder, move them to the data folder, or set
+`VOICE_STT_MODEL_DIR` to that folder.
+
 To uninstall, use Windows Settings > Apps. Your models and your dictionary
 stay.
+
+### macOS
+
+TDT runs on macOS 11 or later, on Apple silicon and on Intel Macs.
+
+1. Download `TDT-macOS.dmg` from the
+   [latest release](https://github.com/Hi9841/tdt/releases/latest), open it,
+   and drag TDT to Applications.
+2. Open TDT. It lives in the menu bar, not in the Dock.
+3. Allow the two permissions that macOS asks for:
+   - **Microphone**, to record your voice.
+   - **Accessibility** (System Settings > Privacy & Security > Accessibility),
+     to read the shortcut and to type the text. The shortcut starts to work
+     when you allow it; you do not have to restart TDT.
+4. Open Settings from the menu bar icon and download **Parakeet Redux**.
+
+If the release is not signed with a Developer ID, macOS stops the first
+start. Open System Settings > Privacy & Security and click **Open Anyway**.
+
+On macOS the data folder is `~/Library/Application Support/TDT`, and the log
+is `~/Library/Logs/TDT/tdt.log`. To uninstall, quit TDT from the menu bar and
+move TDT from Applications to the Trash. To remove the login item too, turn
+off **Open at login** first.
 
 ## Use
 
@@ -57,12 +87,13 @@ stay.
 | Start and stop a recording | Tap `Ctrl + ;` once to start and once to stop. |
 | Record while you hold the key | Hold `Ctrl + ;`, speak, and release. |
 | Change the shortcut | Settings > **Shortcut** > **Change**, then press the new keys or a side mouse button. |
-| Open Stats and Settings | Click the tray icon. |
+| Open Stats and Settings | Click the tray icon. On macOS, click the menu bar icon and choose **Open TDT**. |
 
 TDT types the text into the window that had focus and copies it to the
 clipboard. A recording can be up to 120 seconds long. If the text does not
-appear, press Ctrl+V; the pill tells you why. For example, Windows does not
-let TDT type into an app that runs as administrator.
+appear, press Ctrl+V (Cmd+V on macOS); the pill tells you why. For example,
+Windows does not let TDT type into an app that runs as administrator, and
+macOS does not let TDT type while a password field has secure input.
 
 The time on the pill and in History is the wait you feel: from the moment you
 ask to stop (you release a hold, or press the key for a tap) until the text is
@@ -86,8 +117,8 @@ the end of your last word, the model, and the delivery.
 | Model | **Parakeet Redux** (178 MB, the default) or **Parakeet Unified English** (731 MB). On 456 English test clips Unified makes 177 word errors, Redux 301, at about the same speed. |
 | Remove filler words | Removes "um", "uh", "erm", and "hmm". Words that can carry meaning, such as "like", stay. On by default. |
 | Dictionary | Names and terms that TDT must spell your way. See [Dictionary](#dictionary). |
-| Start with Windows | Opens TDT when you sign in. |
-| Check for updates automatically | Looks for a new release at start and every hour. **Update now** downloads the new setup from GitHub, checks its SHA-256 digest, and installs it. |
+| Start with Windows (macOS: Open at login) | Opens TDT when you sign in. |
+| Check for updates automatically | Looks for a new release at start and every hour. **Update now** downloads the new setup from GitHub, checks its SHA-256 digest, and installs it. On macOS, **Download** opens the release page. |
 
 ## Dictionary
 
@@ -119,11 +150,20 @@ has the shortest time per clip. The full tables and the method are in
 
 ## Build from source
 
-You need Rust stable on Windows.
+You need Rust stable on Windows, or Rust stable and the Xcode Command Line
+Tools on macOS.
 
 ```powershell
 cargo run --release --bin download-model --manifest-path .\desktop\Cargo.toml
 cargo run --release --bin TDT --manifest-path .\desktop\Cargo.toml
+```
+
+On macOS, build the app bundle and the disk image. macOS gives the
+permissions to an app bundle, so run TDT from `dist/TDT.app`:
+
+```sh
+packaging/macos/build-app.sh
+open dist/TDT.app
 ```
 
 The checks, the installer build, the release steps, and the layout of the

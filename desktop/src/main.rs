@@ -1,7 +1,7 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
-#[cfg(not(target_os = "windows"))]
-compile_error!("TDT desktop is a Windows-only build.");
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+compile_error!("TDT desktop builds for Windows and macOS.");
 
 mod audio;
 mod autostart;
@@ -9,9 +9,14 @@ mod clock;
 mod config;
 mod dictation;
 mod hotkey;
+mod instance;
+#[cfg(windows)]
 mod integrity;
 mod keys;
 mod logfile;
+#[cfg(target_os = "macos")]
+mod macos;
+mod os_text;
 mod paste;
 mod priority;
 mod target;
@@ -32,6 +37,7 @@ use hotkey::{
     poll_capture_timeout, poll_missed_release, set_binding, wake_loop, HotkeyAction, HotkeyBinding,
     HotkeyListener,
 };
+use instance::{claim_instance, take_show_request, InstanceClaim};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,10 +45,7 @@ use tray_icon::menu::MenuEvent;
 use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
 use ui::preview;
 use ui::tray::tooltip_text;
-use ui::window_util::{
-    ensure_overlay_topmost, find_app_hwnd, follow_current_virtual_desktop, lock_overlay_chrome,
-    position_bubble_on_preferred_monitor, PANEL_HEIGHT, PANEL_WIDTH,
-};
+use ui::window_util::{ensure_overlay_topmost, lock_overlay_chrome, PANEL_HEIGHT, PANEL_WIDTH};
 use ui::{HudView, SystemTray};
 use update::{CheckKind, UpdatePhase};
 use voice_stt_desktop::log;
@@ -169,6 +172,18 @@ fn main() {
     let stt_for_view = stt_engine.clone();
 
     app.run(move |cx: &mut App| {
+        // GPUI makes TDT a regular app with a Dock icon when it finishes
+        // launching. TDT lives in the menu bar.
+        #[cfg(target_os = "macos")]
+        if !is_preview {
+            macos::become_accessory_app();
+            // The shortcut and auto-paste need this permission. The prompt
+            // shows once for each start until the user allows it.
+            if !macos::accessibility_trusted() {
+                macos::reset_stale_permissions();
+                macos::prompt_for_accessibility();
+            }
+        }
         ely_gpui_component::init(cx);
         ui::theme::install(cx);
         // Windows requires the event loop to exist before creating the tray icon.
@@ -193,10 +208,13 @@ fn main() {
         let (tray_tx, tray_rx) = crossbeam_channel::unbounded::<TrayIconEvent>();
         TrayIconEvent::set_event_handler(Some(move |event| {
             // The pointer over the icon gives events that the loop does not use.
-            if matches!(
-                event,
-                TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. }
-            ) {
+            // On macOS a click opens the menu, so it opens nothing else.
+            if !cfg!(target_os = "macos")
+                && matches!(
+                    event,
+                    TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. }
+                )
+            {
                 let _ = tray_tx.send(event);
                 wake_loop();
             }
@@ -232,7 +250,11 @@ fn main() {
             std::env::var_os("VOICE_STT_OPEN_PANEL").is_some() || preview::wants_panel();
         // GPUI creates the window late on a cold start, so its Win32 styles
         // are set from a thread that waits for it.
+        #[cfg(windows)]
         std::thread::spawn(move || {
+            use ui::window_util::{
+                find_app_hwnd, follow_current_virtual_desktop, position_bubble_on_preferred_monitor,
+            };
             let mut overlay = None;
             for _ in 0..60 {
                 overlay = find_app_hwnd();
@@ -271,11 +293,13 @@ fn main() {
         });
 
         match cx.open_window(window_options, move |window, cx| {
+            #[cfg(target_os = "macos")]
+            install_macos_overlay(window, open_panel);
             cx.new(|cx: &mut Context<HudView>| {
                 // The panel is a flyout: it closes when the user switches to
                 // another app, so it never stays on top of a game or a window.
                 cx.observe_window_activation(window, |view, window, cx| {
-                    if !window.is_window_active() {
+                    if !window.is_window_active() && ui::window_util::closes_on_deactivation() {
                         view.close_stats_settings(cx);
                     }
                 })
@@ -337,6 +361,17 @@ fn main() {
                                 view.take_retry_microphone()
                             })
                             .unwrap_or(false);
+                        // The user answered the macOS microphone prompt: open
+                        // it now, or show why macOS refused it.
+                        #[cfg(target_os = "macos")]
+                        let retry = retry | audio::take_microphone_answer();
+                        #[cfg(target_os = "macos")]
+                        if hotkey::take_permission_granted() {
+                            let _ = this.update(cx, |view, cx| {
+                                view.clear_notice(ACCESSIBILITY_NOTICE);
+                                cx.notify();
+                            });
+                        }
                         if retry {
                             // Opening the microphone makes COM calls, and COM on
                             // this thread can run a message loop. Inside an
@@ -552,7 +587,18 @@ impl Live {
         // blocks the first frame, and the popup then stays without WS_VISIBLE.
         std::thread::spawn(prewarm);
         watch_default_input();
-        let (recorder, microphone_error) = match AudioRecorder::new() {
+        // A first start asks for the microphone and opens it when the user
+        // answers; until then there is nothing to report.
+        #[cfg(target_os = "macos")]
+        let ask_first = audio::microphone_not_asked();
+        #[cfg(not(target_os = "macos"))]
+        let ask_first = false;
+        let (recorder, microphone_error) = if ask_first {
+            #[cfg(target_os = "macos")]
+            audio::ask_microphone();
+            (None, None)
+        } else {
+            match AudioRecorder::new() {
             Ok(recorder) => {
                 log::note(&format!("Microphone: {}", recorder.describe()));
                 (Some(recorder), None)
@@ -563,6 +609,7 @@ impl Live {
                     "Could not start the microphone. Connect a microphone and choose Retry microphone. {error}"
                 )),
             ),
+            }
         };
 
         // Load and warm the selected model while the app opens, so a short first
@@ -611,6 +658,7 @@ impl Live {
 /// Ends the process without DLL and thread-local teardown. Teardown runs
 /// after Windows stops every other thread, so a step that waits on one, as a
 /// COM release into Explorer did, keeps a windowless TDT alive forever.
+#[cfg(windows)]
 fn exit_now(code: u32) -> ! {
     // SAFETY: TerminateProcess on this process's own pseudo-handle.
     unsafe {
@@ -620,67 +668,50 @@ fn exit_now(code: u32) -> ! {
     std::process::exit(code as i32)
 }
 
-/// The single-instance mutex. Setup (`packaging/tdt-setup`, `INSTANCE_MUTEX`)
-/// waits on this name for TDT to quit: change both together.
-const INSTANCE_MUTEX: windows::core::PCWSTR = windows::core::w!("Local\\TDT-TalkDontType");
-/// A second start sets this event, and the running TDT opens its panel.
-const SHOW_EVENT: windows::core::PCWSTR = windows::core::w!("Local\\TDT-ShowOverlay");
-
-enum InstanceClaim {
-    Owned(InstanceGuard),
-    AlreadyRunning,
-    Failed(String),
+/// Ends the process at once, without the exit handlers of libraries.
+#[cfg(target_os = "macos")]
+fn exit_now(code: u32) -> ! {
+    // SAFETY: _exit ends the process and returns never; nothing runs after it.
+    unsafe { libc::_exit(code as i32) }
 }
 
-struct InstanceGuard {
-    mutex: windows::Win32::Foundation::HANDLE,
-    show_event: windows::Win32::Foundation::HANDLE,
-}
-
-impl Drop for InstanceGuard {
-    fn drop(&mut self) {
-        // SAFETY: both handles come from `claim_instance` and are closed once, here. The slot is cleared first,
-        // so `take_show_request` cannot use the event after it closes.
-        unsafe {
-            *show_event_slot().lock() = None;
-            let _ = windows::Win32::Foundation::CloseHandle(self.show_event);
-            let _ = windows::Win32::Foundation::CloseHandle(self.mutex);
-        }
-    }
-}
-
-fn show_event_slot() -> &'static Mutex<Option<isize>> {
-    static SLOT: Mutex<Option<isize>> = Mutex::new(None);
-    &SLOT
-}
-
-fn take_show_request() -> bool {
-    use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
-    use windows::Win32::System::Threading::WaitForSingleObject;
-    // The lock stays held, so `InstanceGuard::drop` cannot close the event mid-call.
-    let slot = show_event_slot().lock();
-    let Some(raw) = *slot else {
-        return false;
+/// Takes the overlay's `NSWindow` from GPUI's view and sets it up.
+#[cfg(target_os = "macos")]
+fn install_macos_overlay(window: &Window, open_panel: bool) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        log::note("Could not get the overlay window from GPUI.");
+        return;
     };
-    // SAFETY: the slot holds the event until `InstanceGuard::drop` clears it under this
-    // lock, so the handle is open. A zero timeout only reads the event state.
-    unsafe { WaitForSingleObject(HANDLE(raw as _), 0) == WAIT_OBJECT_0 }
-}
-
-fn signal_running_instance() {
-    use windows::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
-    // SAFETY: the name is a static null-terminated string, and the opened handle is closed after use.
-    unsafe {
-        if let Ok(handle) = OpenEventW(EVENT_MODIFY_STATE, false, SHOW_EVENT) {
-            let _ = SetEvent(handle);
-            let _ = windows::Win32::Foundation::CloseHandle(handle);
-        }
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: the view is GPUI's content view of the overlay, which TDT
+    // keeps open until the process ends.
+    unsafe { ui::window_util::install_overlay(appkit.ns_view.as_ptr()) };
+    if open_panel {
+        ui::window_util::set_window_mode(true);
     }
 }
+
+/// macOS gives TDT no keys, and drops the keys TDT types, until the user
+/// allows TDT in Privacy & Security > Accessibility.
+#[cfg(target_os = "macos")]
+fn low_rights_message() -> Option<String> {
+    (!macos::accessibility_trusted()).then(|| ACCESSIBILITY_NOTICE.to_string())
+}
+
+/// The request for the Accessibility permission. It leaves the pill when the
+/// user gives the permission.
+#[cfg(target_os = "macos")]
+const ACCESSIBILITY_NOTICE: &str = "Allow TDT in System Settings > Privacy & Security > \
+     Accessibility. The shortcut and auto-paste start to work when you allow it. If TDT is \
+     already on in the list, turn it off and on again.";
 
 /// Windows starts an exe at low integrity when the file carries a low-rights
 /// label (files saved into a folder with that label inherit it). A low process
 /// cannot read keys from, or paste into, normal apps.
+#[cfg(windows)]
 fn low_rights_message() -> Option<String> {
     if integrity::own()? >= integrity::MEDIUM {
         return None;
@@ -694,49 +725,6 @@ fn low_rights_message() -> Option<String> {
     ))
 }
 
-fn claim_instance() -> InstanceClaim {
-    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
-    use windows::Win32::System::Threading::{CreateEventW, CreateMutexW};
-
-    // SAFETY: Win32 object calls with static names. Each handle is closed on every failure path or owned
-    // by the returned guard.
-    unsafe {
-        // CreateMutexW's wrapper does not surface ERROR_ALREADY_EXISTS.
-        // Open the existing object first so a second launch cannot start
-        // another speech worker.
-        if let Ok(existing) = windows::Win32::System::Threading::OpenMutexW(
-            windows::Win32::System::Threading::SYNCHRONIZATION_ACCESS_RIGHTS(0x00100000),
-            false,
-            INSTANCE_MUTEX,
-        ) {
-            let _ = windows::Win32::Foundation::CloseHandle(existing);
-            signal_running_instance();
-            return InstanceClaim::AlreadyRunning;
-        }
-        match CreateMutexW(None, true, INSTANCE_MUTEX) {
-            Ok(mutex) => {
-                if GetLastError() == ERROR_ALREADY_EXISTS {
-                    let _ = windows::Win32::Foundation::CloseHandle(mutex);
-                    signal_running_instance();
-                    InstanceClaim::AlreadyRunning
-                } else {
-                    match CreateEventW(None, false, false, SHOW_EVENT) {
-                        Ok(show_event) => {
-                            *show_event_slot().lock() = Some(show_event.0 as isize);
-                            InstanceClaim::Owned(InstanceGuard { mutex, show_event })
-                        }
-                        Err(error) => {
-                            let _ = windows::Win32::Foundation::CloseHandle(mutex);
-                            InstanceClaim::Failed(format!("Could not start TDT: {error}"))
-                        }
-                    }
-                }
-            }
-            Err(error) => InstanceClaim::Failed(format!("Could not start TDT: {error}")),
-        }
-    }
-}
-
 fn lock_working_directory() {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -745,6 +733,25 @@ fn lock_working_directory() {
     }
 }
 
+/// An error dialog. `osascript` gets the text as an argument, never as
+/// script source, so no text can change the script.
+#[cfg(target_os = "macos")]
+fn show_error(message: &str) {
+    let _ = std::process::Command::new("/usr/bin/osascript")
+        .args([
+            "-e",
+            "on run argv",
+            "-e",
+            "display alert \"TDT\" message (item 1 of argv) as critical",
+            "-e",
+            "end run",
+            "--",
+            message,
+        ])
+        .status();
+}
+
+#[cfg(windows)]
 fn show_error(message: &str) {
     use windows::core::HSTRING;
     use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};

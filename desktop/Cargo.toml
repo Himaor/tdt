@@ -10,7 +10,7 @@ repository = "https://github.com/Hi9841/tdt"
 documentation = "https://github.com/Hi9841/tdt#readme"
 authors = ["Hi9841"]
 keywords = ["speech-to-text", "dictation", "parakeet", "offline"]
-categories = ["accessibility", "multimedia::audio", "os::windows-apis"]
+categories = ["accessibility", "multimedia::audio", "os::windows-apis", "os::macos-apis"]
 
 [lib]
 name = "voice_stt_desktop"
@@ -74,6 +74,14 @@ windows = { version = "0.58", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_ProcessStatus"
 ] }
+
+# AppKit and CoreGraphics for the macOS build. These versions are already in
+# the lockfile through GPUI, so the port adds no new package.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+libc = "0.2"
+raw-window-handle = "0.6"
 
 [build-dependencies]
 embed-resource = "3.0"

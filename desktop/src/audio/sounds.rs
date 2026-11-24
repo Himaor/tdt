@@ -32,8 +32,11 @@ pub fn prewarm() {
 }
 
 pub fn play_sound(effect: SoundEffect) {
-    let wav_bytes: &'static [u8] = wav_for(effect);
+    play_wav(effect as usize, wav_for(effect));
+}
 
+#[cfg(windows)]
+fn play_wav(_cue: usize, wav_bytes: &'static [u8]) {
     use windows::core::PCWSTR;
     use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
 
@@ -50,6 +53,50 @@ pub fn play_sound(effect: SoundEffect) {
             SND_ASYNC | SND_MEMORY | SND_NODEFAULT,
         );
     }
+}
+
+/// The macOS form: one `NSSound` for each cue, made from the WAV bytes on
+/// the first play and kept. A new cue stops the one that plays, as
+/// SND_ASYNC does on Windows.
+#[cfg(target_os = "macos")]
+fn play_wav(cue: usize, wav_bytes: &'static [u8]) {
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2::{class, msg_send};
+    use std::sync::atomic::{AtomicPtr, Ordering};
+
+    static SOUNDS: [AtomicPtr<AnyObject>; SoundEffect::ALL.len()] =
+        [const { AtomicPtr::new(std::ptr::null_mut()) }; SoundEffect::ALL.len()];
+
+    // AppKit objects stay on the main thread.
+    crate::macos::on_main_thread(move || {
+        // SAFETY: on the main thread. The NSData points at `'static` bytes and
+        // does not free them; each NSSound is created once and never released.
+        unsafe {
+            for (index, slot) in SOUNDS.iter().enumerate() {
+                let sound = slot.load(Ordering::Relaxed);
+                if index != cue && !sound.is_null() {
+                    let _: Bool = msg_send![sound, stop];
+                }
+            }
+            let mut sound = SOUNDS[cue].load(Ordering::Relaxed);
+            if sound.is_null() {
+                let data: *mut AnyObject = msg_send![
+                    class!(NSData),
+                    dataWithBytesNoCopy: wav_bytes.as_ptr().cast_mut().cast::<std::ffi::c_void>(),
+                    length: wav_bytes.len(),
+                    freeWhenDone: Bool::NO
+                ];
+                let alloc: *mut AnyObject = msg_send![class!(NSSound), alloc];
+                sound = msg_send![alloc, initWithData: data];
+                if sound.is_null() {
+                    return;
+                }
+                SOUNDS[cue].store(sound, Ordering::Relaxed);
+            }
+            let _: Bool = msg_send![sound, stop];
+            let _: Bool = msg_send![sound, play];
+        }
+    });
 }
 
 fn wav_for(effect: SoundEffect) -> &'static [u8] {
